@@ -1,0 +1,75 @@
+from pyb import I2C
+import time
+
+DRV_ADDR = 0x5A
+i2c = I2C(2, I2C.MASTER, baudrate=400000)
+
+def w(reg, val):
+    i2c.mem_write(bytes([val]), DRV_ADDR, reg)
+
+w(0x01, 0x00)
+w(0x03, 0x01)
+
+def buzz(effect=1):
+    w(0x04, effect)
+    w(0x05, 0x00)
+    w(0x0C, 0x01)
+
+print("Buzz test: motor should click every 2s")
+while True:
+    buzz(1)
+    time.sleep_ms(2000)
+
+
+#buzz whenever moving
+import sensor, image, time
+from pyb import I2C
+
+DRV=0x5A
+i2c=I2C(2, I2C.MASTER, baudrate=100000)
+def w(r,v,tries=5):
+    b=bytes([v&0xFF])
+    for _ in range(tries):
+        try: i2c.mem_write(b, DRV, r); return True
+        except OSError: time.sleep_ms(3); i2c.init(I2C.MASTER, baudrate=100000)
+    return False
+def drv_init_3v3():
+    ok  = w(0x01,0x00); ok &= w(0x03,0x01)
+    ok &= w(0x16,0x9B); ok &= w(0x17,0x9B)
+    ok &= w(0x1A,0x93); ok &= w(0x1B,0xA3)
+    return ok
+def buzz(effect=1):
+    return w(0x04,effect) and w(0x05,0x00) and w(0x0C,0x01)
+
+sensor.reset()
+sensor.set_pixformat(sensor.GRAYSCALE)
+sensor.set_framesize(sensor.QVGA)
+sensor.skip_frames(time=800)
+sensor.set_auto_gain(False, gain_db=12)
+sensor.set_auto_exposure(False, exposure_us=17000)
+sensor.set_auto_whitebal(False)
+sensor.skip_frames(time=300)
+
+bg = sensor.snapshot().mean(3)
+ALPHA = 225
+DIFF_THRESH  = 24
+AREA_THRESH  = 0.05
+CALM_RATIO_MAX = 0.02
+COOLDOWN_MS = 1200
+last_buzz = time.ticks_ms() - COOLDOWN_MS
+
+print("DRV init:", drv_init_3v3())
+
+while True:
+    frame = sensor.snapshot()
+    diff  = frame.copy()
+    diff.difference(bg)
+    mask = diff.copy()
+    mask.binary([(DIFF_THRESH, 255)])
+    ratio = mask.get_statistics().mean()/255.0
+    print("ratio:", ratio)
+    if ratio > AREA_THRESH and time.ticks_diff(time.ticks_ms(), last_buzz) > COOLDOWN_MS:
+        if not buzz(7): drv_init_3v3()
+        last_buzz = time.ticks_ms()
+    if ratio < CALM_RATIO_MAX:
+        bg = bg.blend(frame, alpha=ALPHA)

@@ -1,0 +1,88 @@
+#approaching
+import sensor, image, time
+from pyb import I2C
+
+DRV = 0x5A
+i2c = I2C(2, I2C.MASTER, baudrate=100000)
+def w(reg, val, tries=5):
+    b = bytes([val & 0xFF])
+    for _ in range(tries):
+        try:
+            i2c.mem_write(b, DRV, reg); return True
+        except OSError:
+            time.sleep_ms(3)
+            i2c.init(I2C.MASTER, baudrate=100000)
+    return False
+def drv_init_3v3():
+    ok  = w(0x01, 0x00)
+    ok &= w(0x03, 0x01)
+    ok &= w(0x16, 0x9B)
+    ok &= w(0x17, 0x9B)
+    ok &= w(0x1A, 0x93)
+    ok &= w(0x1B, 0xA3)
+    return ok
+def buzz(effect=7):
+    return w(0x04, effect) and w(0x05, 0x00) and w(0x0C, 0x01)
+
+sensor.reset()
+sensor.set_pixformat(sensor.GRAYSCALE)
+sensor.set_framesize(sensor.QVGA)
+sensor.skip_frames(time=800)
+sensor.set_auto_gain(False, gain_db=12)
+sensor.set_auto_exposure(False, exposure_us=17000)
+sensor.set_auto_whitebal(False)
+sensor.skip_frames(time=300)
+
+W, H       = sensor.width(), sensor.height()
+FRAME_PIX  = W * H
+
+bg            = sensor.snapshot().mean(3)
+ALPHA         = 225
+DIFF_THRESH   = 22
+BINARY_TH     = (DIFF_THRESH, 255)
+ERODE_ITERS   = 0
+DILATE_ITERS  = 1
+AREA_MIN        = 0.008
+GROWTH_MIN      = 0.0016
+EMA_A           = 0.50
+WIN_M           = 5
+WIN_K           = 3
+GROWTH_MED      = 0.008
+GROWTH_FAST     = 0.015
+COOLDOWN_MS     = 1200
+last_buzz       = time.ticks_ms() - COOLDOWN_MS
+area_ema_prev   = 0.0
+area_ema        = 0.0
+pos_hist        = [0]*WIN_M
+idx             = 0
+
+print("DRV init:", drv_init_3v3())
+print("Largest-blob looming (growth->effect) running…")
+
+while True:
+    frame = sensor.snapshot()
+    diff  = frame.copy(); diff.difference(bg)
+    mask  = diff.copy();  mask.binary([BINARY_TH])
+    if ERODE_ITERS:  mask.erode(ERODE_ITERS)
+    if DILATE_ITERS: mask.dilate(DILATE_ITERS)
+    blobs = mask.find_blobs([(200, 255)], pixels_threshold=150, area_threshold=150, merge=True)
+    area_frac = 0.0
+    if blobs:
+        biggest = max(blobs, key=lambda b: b.pixels())
+        area_frac = biggest.pixels() / float(FRAME_PIX)
+    area_ema_prev = area_ema
+    area_ema      = (1 - EMA_A) * area_ema + EMA_A * area_frac
+    growth        = area_ema - area_ema_prev
+    pos_hist[idx] = int((area_ema > AREA_MIN) and (growth > GROWTH_MIN))
+    idx           = (idx + 1) % WIN_M
+    positives     = sum(pos_hist)
+    now = time.ticks_ms()
+    if (positives >= WIN_K) and (time.ticks_diff(now, last_buzz) > COOLDOWN_MS):
+        if   growth > GROWTH_FAST: level = 47
+        elif growth > GROWTH_MED:  level = 14
+        else:                      level = 7
+        if not buzz(level): drv_init_3v3()
+        last_buzz = now
+        pos_hist = [0]*WIN_M
+    if area_frac < 0.01:
+        bg = bg.blend(frame, alpha=ALPHA)
